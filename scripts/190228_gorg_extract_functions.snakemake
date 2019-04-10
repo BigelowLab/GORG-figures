@@ -1,0 +1,109 @@
+import os.path as op
+import os
+import pandas as pd
+from collections import Counter, defaultdict
+import numpy as np
+import random
+
+from scgc.utils import safe_makedir
+
+
+
+cdir = '/mnt/scgc/simon/simonsproject/gorg-clustering'
+identifier = "gorg_sag_orfs"
+qual="80minid_m80"
+tsv_file = op.join(cdir, "analyses", "{}_{}.tsv".format(identifier, qual))
+
+final_outtbl = "/mnt/scgc/simon/simonsproject/gorg-clustering/analyses/snakemake_cluster_tbl_rand_orf.tsv"
+
+def get_tbls(sag):
+    return op.join("/mnt/scgc/simon/simonsproject/gorg-annotations/",
+                   '{sag}_functional_annotation'.format(sag=sag),
+                   'Prokka',
+                   '{sag}.gff'.format(sag=sag))
+
+def split_description(desc):
+   dict1 = defaultdict(lambda:None)
+   for i in desc.split(";"):
+       dict1[i.split("=")[0]] = i.split("=")[1]
+   return dict1
+
+def touch(path):
+    with open(path, 'a'):
+        os.utime(path, None)
+
+
+splits = list(np.arange(0,1000))
+
+rule all:
+    input:final_outtbl
+
+
+rule split_tbl:
+    output: expand("/mnt/scgc/simon/simonsproject/gorg-clustering/analyses/subclust_tbls/{s}.csv", s=splits)
+    run:
+        df = pd.read_csv(tsv_file, sep="\t", names = ['c1','c2'])
+        df['sag'] = [i.split(".")[0].split("_")[0] for i in df['c2']]
+        df.rename(columns={'c1':'cluster','c2':'orf'}, inplace=True)
+
+        clusters = df['cluster'].unique()
+        split = int(len(clusters) / 1000 + 1)
+        for n, i in enumerate(range(0, len(clusters), split)):
+            subclusts = clusters[i:i + split]
+            df[df['cluster'].isin(subclusts)].to_csv("/mnt/scgc/simon/simonsproject/gorg-clustering/analyses/subclust_tbls/{s}.csv".format(s=n))
+
+
+rule summarize_clusters:
+    input:
+        tbl = "/mnt/scgc/simon/simonsproject/gorg-clustering/analyses/subclust_tbls/{s}.csv"
+    output:
+        oh = "/mnt/scgc/simon/simonsproject/gorg-clustering/analyses/rand_sample_tbls/{s}.csv"
+    run:
+
+        names = ['contig', 'method','type','start','stop','dot','strand','value','desc']
+        df = pd.read_csv(input.tbl)
+        with open(output.oh, "w") as oh:
+            for c, clust in enumerate(df['cluster'].unique()):
+                #if c == 0:
+                #    print('cluster','cluster_size','rand_orf','ec_number','product','Name', sep="\t")
+                subdf = df[df['cluster'] == clust]
+
+                # get random row to grab annotation from
+                idx = random.randint(0,len(subdf) - 1)
+
+                rand_row = subdf.iloc[idx]
+
+                with open(get_tbls(rand_row['sag'])) as ih:
+                    for l in ih:
+                        if "CDS" in l:
+                            toks = dict(zip(names, l.strip().split("\t")))
+                            desc = split_description(toks['desc'])
+                            if desc['ID'] == rand_row['orf']:
+                                desc['orf'] = desc['ID']
+                                desc['contig'] = toks['contig']
+                                desc['cluster'] = clust
+                                desc['cluster_size'] = len(subdf)
+                                break
+
+                for r in ['eC_number','product', 'Name']:
+                    if r not in desc.keys():
+                        desc[r] = ''
+
+                print(desc['cluster'], desc['cluster_size'], desc['orf'], desc['eC_number'],
+                      desc['product'], desc['Name'], sep="\t", file=oh)
+
+
+rule concatenate_tbls:
+    input:
+        expand("/mnt/scgc/simon/simonsproject/gorg-clustering/analyses/rand_sample_tbls/{s}.csv",
+        s=splits)
+    output:
+        final_outtbl
+    shell:
+        "cat {input} > {output}"
+
+
+'''
+snakemake -s /mnt/scgc/stepanauskas_nfs/julia/pbs_subs/190228_gorg_extract_functions.snakemake \
+--cluster "qsub -q scgc-low -j oe -o /home/julia/out/190228_snakemake/" -j 120 --latency-wait 20 all
+'''
